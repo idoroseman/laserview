@@ -36,3 +36,9 @@ npm run dev
 ```sh
 npm run build
 ```
+
+### Compile and Deploy for Production
+
+```sh
+npm run deploy
+```
