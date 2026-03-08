@@ -4,10 +4,11 @@ import { parseGcode } from './gcodeParser';
 
 const mousePosPx = ref(null); // {x, y} in canvas px
 const mousePosGcode = ref(null); // {x, y} in gcode units
-const mousePosCm = ref(null); // {x, y} in cm
+const mousePosMm = ref(null); // {x, y} in mm
 const showCoords = ref(false);
 
 const showGrid = ref(false);
+const showHeadMoves = ref(true);
 
 const canvasRef = ref(null);
 const containerRef = ref(null);
@@ -16,6 +17,7 @@ const status = ref('Drop a .gcode file here or use the button.');
 const isDragging = ref(false);
 
 const toolpath = ref([]);
+const dwellPoints = ref([]);
 
 function onDragOver(event) {
   event.preventDefault();
@@ -49,15 +51,19 @@ function handleFile(file) {
   reader.onload = () => {
     const text = String(reader.result || '');
     gcodeText.value = text;
-    const paths = parseGcode(text);
+    const parsed = parseGcode(text);
+    const paths = parsed.paths;
+    const dwells = parsed.dwellPoints;
 
-    if (!paths.length) {
-      status.value = 'No paths (M106/M107 + G0/G1 moves) found in file.';
+    if (!paths.length && !dwells.length) {
+      status.value = 'No paths or G04 dwell points found in file.';
       toolpath.value = [];
+      dwellPoints.value = [];
     } else {
       toolpath.value = paths;
+      dwellPoints.value = dwells;
       const moveCount = paths.reduce((sum, path) => sum + path.points.length, 0);
-      status.value = `Loaded ${paths.length} paths, ${moveCount} moves.`;
+      status.value = `Loaded ${paths.length} paths, ${moveCount} moves, ${dwells.length} dwells.`;
     }
 
     redraw();
@@ -68,7 +74,7 @@ function handleFile(file) {
   reader.readAsText(file);
 }
 
-function getBounds(paths) {
+function getBounds(paths, points = []) {
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -81,6 +87,13 @@ function getBounds(paths) {
       if (p.y < minY) minY = p.y;
       if (p.y > maxY) maxY = p.y;
     }
+  }
+
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
   }
 
   if (!isFinite(minX) || !isFinite(maxX) || !isFinite(minY) || !isFinite(maxY)) {
@@ -102,6 +115,11 @@ function resizeCanvasToContainer() {
   canvas.height = rect.height * dpr;
 }
 
+function getVisiblePaths() {
+  if (showHeadMoves.value) return toolpath.value;
+  return toolpath.value.filter((path) => path.drawn);
+}
+
 function redraw() {
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -111,12 +129,18 @@ function redraw() {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (!toolpath.value.length) {
+  const visiblePaths = getVisiblePaths();
+
+  if (!visiblePaths.length && !dwellPoints.value.length) {
+    redraw._bounds = null;
     return;
   }
 
-  const bounds = getBounds(toolpath.value);
-  if (!bounds) return;
+  const bounds = getBounds(visiblePaths, dwellPoints.value);
+  if (!bounds) {
+    redraw._bounds = null;
+    return;
+  }
 
   const padding = 20;
   const w = canvas.width;
@@ -167,7 +191,7 @@ function redraw() {
 
   const allPoints = [];
 
-  toolpath.value.forEach((path) => {
+  visiblePaths.forEach((path) => {
     if (!path.points.length) return;
 
     ctx.beginPath();
@@ -213,6 +237,17 @@ function redraw() {
     ctx.fill();
   }
 
+  if (dwellPoints.value.length) {
+    ctx.fillStyle = '#1565c0';
+    for (const p of dwellPoints.value) {
+      const x = offsetX + (p.x - bounds.minX) * scale;
+      const y = offsetY + (bounds.maxY - p.y) * scale;
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   ctx.restore();
 }
 
@@ -235,7 +270,8 @@ function handleResize() {
 
 function handleMouseMove(e) {
   const canvas = canvasRef.value;
-  if (!canvas || !toolpath.value.length) {
+  const visiblePaths = getVisiblePaths();
+  if (!canvas || (!visiblePaths.length && !dwellPoints.value.length)) {
     showCoords.value = false;
     return;
   }
@@ -259,8 +295,8 @@ function handleMouseMove(e) {
   const gx = (px - offsetX) / scale + bounds.minX;
   const gy = bounds.maxY - (py - offsetY) / scale;
   mousePosGcode.value = { x: gx, y: gy };
-  // Convert to cm (assuming G-code units are mm)
-  mousePosCm.value = { x: gx / 10, y: gy / 10 };
+  // Assume G-code units are mm and show mm directly.
+  mousePosMm.value = { x: gx, y: gy };
   showCoords.value = true;
 }
 
@@ -273,7 +309,16 @@ watch(toolpath, () => {
   redraw();
 });
 
+watch(dwellPoints, () => {
+  resizeCanvasToContainer();
+  redraw();
+});
+
 watch(showGrid, () => {
+  redraw();
+});
+
+watch(showHeadMoves, () => {
   redraw();
 });
 </script>
@@ -292,10 +337,16 @@ watch(showGrid, () => {
     <main class="col col-center">
           <header class="center-header">
             <h1>G-code viewer</h1>
-            <label class="toggle-grid">
-              <input type="checkbox" v-model="showGrid" />
-              <span>Show grid</span>
-            </label>
+            <div class="header-toggles">
+              <label class="toggle-grid">
+                <input type="checkbox" v-model="showGrid" />
+                <span>Show grid</span>
+              </label>
+              <label class="toggle-grid">
+                <input type="checkbox" v-model="showHeadMoves" />
+                <span>Show head moves</span>
+              </label>
+            </div>
           </header>
 
 
@@ -308,15 +359,15 @@ watch(showGrid, () => {
         @drop="onDrop"
       >
         <canvas ref="canvasRef"></canvas>
-        <div v-if="!toolpath.length" class="canvas-placeholder">
+        <div v-if="!toolpath.length && !dwellPoints.length" class="canvas-placeholder">
           Drop a G-code file here or use the "Open G-code file" button.
         </div>
         <div v-if="isDragging" class="drag-overlay">
           Drop file to load
         </div>
-            <div v-if="showCoords && mousePosCm" class="coords-bar">
-              X: {{ mousePosCm.x.toFixed(2) }} cm,
-              Y: {{ mousePosCm.y.toFixed(2) }} cm
+            <div v-if="showCoords && mousePosMm" class="coords-bar">
+              X: {{ mousePosMm.x.toFixed(2) }} mm,
+              Y: {{ mousePosMm.y.toFixed(2) }} mm
             </div>
       </div>
     </main>
@@ -460,16 +511,26 @@ watch(showGrid, () => {
 </style>
 
 <style scoped>
+.header-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 .toggle-grid {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
   font-size: 1rem;
-  margin-left: 1rem;
 }
 @media (max-width: 768px) {
   .app-layout {
     grid-template-columns: 1fr;
+  }
+
+  .header-toggles {
+    justify-content: flex-start;
   }
 }
 </style>

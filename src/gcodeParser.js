@@ -5,8 +5,23 @@ export function parseGcode(text) {
   let y = 0;
 
   const paths = [];
+  const dwellPoints = [];
   let currentPath = null;
   let currentDrawn = false; // controlled by M106 (true) / M107 (false)
+
+  const ensureCurrentPath = (startX = x, startY = y) => {
+    if (!currentPath) {
+      currentPath = { drawn: currentDrawn, points: [{ x: startX, y: startY }] };
+      paths.push(currentPath);
+    }
+  };
+
+  const pushPoint = (px, py) => {
+    const last = currentPath?.points[currentPath.points.length - 1];
+    if (!last || last.x !== px || last.y !== py) {
+      currentPath.points.push({ x: px, y: py });
+    }
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.split(';')[0].trim();
@@ -24,41 +39,24 @@ export function parseGcode(text) {
       continue;
     }
     // G00 / G0 and G01 / G1 - linear moves
-    if (/^G0?0?1?\b/i.test(line) && /\bG0?1?\b/i.test(line)) {
+    if (/^G(?:0|00|1|01)\b/i.test(line)) {
       const xMatch = line.match(/\bX(-?\d+(?:\.\d+)?)/i);
       const yMatch = line.match(/\bY(-?\d+(?:\.\d+)?)/i);
 
-      if (xMatch) x = parseFloat(xMatch[1]);
-      if (yMatch) y = parseFloat(yMatch[1]);
+      const x1 = xMatch ? parseFloat(xMatch[1]) : x;
+      const y1 = yMatch ? parseFloat(yMatch[1]) : y;
 
-      if (!currentPath) {
-        currentPath = { drawn: currentDrawn, points: [] };
-        paths.push(currentPath);
-      }
+      ensureCurrentPath(x, y);
+      pushPoint(x1, y1);
 
-      currentPath.points.push({ x, y });
+      x = x1;
+      y = y1;
       continue;
     }
 
-    // G00 rapid move (alias G0) - treat same as linear move here
-    if (/^G0\b/i.test(line)) {
-      const xMatch = line.match(/\bX(-?\d+(?:\.\d+)?)/i);
-      const yMatch = line.match(/\bY(-?\d+(?:\.\d+)?)/i);
-
-      if (xMatch) x = parseFloat(xMatch[1]);
-      if (yMatch) y = parseFloat(yMatch[1]);
-
-      if (!currentPath) {
-        currentPath = { drawn: currentDrawn, points: [] };
-        paths.push(currentPath);
-      }
-
-      currentPath.points.push({ x, y });
-      continue;
-    }
-
-    // G04 dwell - no motion, ignore
-    if (/^G04\b/i.test(line)) {
+    // G04 / G4 dwell - mark current position
+    if (/^G0?4\b/i.test(line)) {
+      dwellPoints.push({ x, y });
       continue;
     }
 
@@ -94,17 +92,14 @@ export function parseGcode(text) {
         const arcLen = Math.abs(delta) * radius;
         const segments = Math.max(6, Math.ceil(arcLen / 1)); // ~1 unit per segment, min 6
 
-        if (!currentPath) {
-          currentPath = { drawn: currentDrawn, points: [] };
-          paths.push(currentPath);
-        }
+        ensureCurrentPath(x, y);
 
         for (let s = 1; s <= segments; s++) {
           const t = s / segments;
           const angle = startAngle + delta * t;
           const px = cx + radius * Math.cos(angle);
           const py = cy + radius * Math.sin(angle);
-          currentPath.points.push({ x: +px, y: +py });
+          pushPoint(+px, +py);
         }
 
         x = x1;
@@ -121,11 +116,8 @@ export function parseGcode(text) {
         const chordLen = Math.hypot(dx, dy);
         if (chordLen === 0 || r < chordLen / 2) {
           // Invalid arc, treat as linear
-          if (!currentPath) {
-            currentPath = { drawn: currentDrawn, points: [] };
-            paths.push(currentPath);
-          }
-          currentPath.points.push({ x: x1, y: y1 });
+          ensureCurrentPath(x, y);
+          pushPoint(x1, y1);
           x = x1; y = y1;
           continue;
         }
@@ -161,17 +153,14 @@ export function parseGcode(text) {
         const arcLen2 = Math.abs(delta) * radiusUsed;
         const segments2 = Math.max(6, Math.ceil(arcLen2 / 1));
 
-        if (!currentPath) {
-          currentPath = { drawn: currentDrawn, points: [] };
-          paths.push(currentPath);
-        }
+        ensureCurrentPath(x, y);
 
         for (let s = 1; s <= segments2; s++) {
           const t = s / segments2;
           const angle = start1 + ( (Math.abs(delta2) < Math.abs(delta1) ? delta2 : delta1) ) * t;
           const px = cx + radiusUsed * Math.cos(angle);
           const py = cy + radiusUsed * Math.sin(angle);
-          currentPath.points.push({ x: +px, y: +py });
+          pushPoint(+px, +py);
         }
 
         x = x1;
@@ -180,16 +169,13 @@ export function parseGcode(text) {
       }
 
       // If we get here, no I/J/R provided — fallback to linear
-      if (!currentPath) {
-        currentPath = { drawn: currentDrawn, points: [] };
-        paths.push(currentPath);
-      }
-      currentPath.points.push({ x: x1, y: y1 });
+      ensureCurrentPath(x, y);
+      pushPoint(x1, y1);
       x = x1; y = y1;
       continue;
     }
   }
 
-  return paths;
+  return { paths, dwellPoints };
 }
 
