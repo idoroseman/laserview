@@ -2,6 +2,10 @@
 
 LaserView is a small web app for previewing G-code toolpaths before sending jobs to a machine.
 
+## Live app
+
+[Open LaserView](https://idoroseman.github.io/laserview/)
+
 ## Why this utility exists
 
 The utility in `gcodeParser.js` exists to turn raw G-code text into drawing-friendly data.
