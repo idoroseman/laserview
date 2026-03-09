@@ -11,8 +11,20 @@ export function parseGcode(text) {
 
   const ensureCurrentPath = (startX = x, startY = y) => {
     if (!currentPath) {
-      currentPath = { drawn: currentDrawn, points: [{ x: startX, y: startY }] };
+      currentPath = {
+        drawn: currentDrawn,
+        points: [{ x: startX, y: startY }],
+        lineNumbers: [],
+      };
       paths.push(currentPath);
+    }
+  };
+
+  const markCurrentPathLine = (lineNumber) => {
+    if (!currentPath) return;
+    const lastLine = currentPath.lineNumbers[currentPath.lineNumbers.length - 1];
+    if (lastLine !== lineNumber) {
+      currentPath.lineNumbers.push(lineNumber);
     }
   };
 
@@ -23,7 +35,8 @@ export function parseGcode(text) {
     }
   };
 
-  for (const rawLine of lines) {
+  for (const [lineIndex, rawLine] of lines.entries()) {
+    const lineNumber = lineIndex + 1;
     const line = rawLine.split(';')[0].trim();
     if (!line) continue;
 
@@ -47,6 +60,7 @@ export function parseGcode(text) {
       const y1 = yMatch ? parseFloat(yMatch[1]) : y;
 
       ensureCurrentPath(x, y);
+      markCurrentPathLine(lineNumber);
       pushPoint(x1, y1);
 
       x = x1;
@@ -93,6 +107,7 @@ export function parseGcode(text) {
         const segments = Math.max(6, Math.ceil(arcLen / 1)); // ~1 unit per segment, min 6
 
         ensureCurrentPath(x, y);
+        markCurrentPathLine(lineNumber);
 
         for (let s = 1; s <= segments; s++) {
           const t = s / segments;
@@ -117,6 +132,7 @@ export function parseGcode(text) {
         if (chordLen === 0 || r < chordLen / 2) {
           // Invalid arc, treat as linear
           ensureCurrentPath(x, y);
+          markCurrentPathLine(lineNumber);
           pushPoint(x1, y1);
           x = x1; y = y1;
           continue;
@@ -154,6 +170,7 @@ export function parseGcode(text) {
         const segments2 = Math.max(6, Math.ceil(arcLen2 / 1));
 
         ensureCurrentPath(x, y);
+        markCurrentPathLine(lineNumber);
 
         for (let s = 1; s <= segments2; s++) {
           const t = s / segments2;
@@ -170,6 +187,7 @@ export function parseGcode(text) {
 
       // If we get here, no I/J/R provided — fallback to linear
       ensureCurrentPath(x, y);
+      markCurrentPathLine(lineNumber);
       pushPoint(x1, y1);
       x = x1; y = y1;
       continue;

@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { parseGcode } from './gcodeParser';
 
 const mousePosPx = ref(null); // {x, y} in canvas px
@@ -12,12 +12,27 @@ const showHeadMoves = ref(true);
 
 const canvasRef = ref(null);
 const containerRef = ref(null);
+const gcodePreviewRef = ref(null);
 const gcodeText = ref('');
 const status = ref('Drop a .gcode file here or use the button.');
 const isDragging = ref(false);
 
 const toolpath = ref([]);
 const dwellPoints = ref([]);
+const selectedPathIndex = ref(null);
+
+const gcodeLines = computed(() => {
+  if (!gcodeText.value) return [];
+  return gcodeText.value.split(/\r?\n/);
+});
+
+const selectedPathLineSet = computed(() => {
+  const pathIndex = selectedPathIndex.value;
+  if (pathIndex === null) return new Set();
+
+  const lineNumbers = toolpath.value[pathIndex]?.lineNumbers ?? [];
+  return new Set(lineNumbers);
+});
 
 function onDragOver(event) {
   event.preventDefault();
@@ -59,9 +74,11 @@ function handleFile(file) {
       status.value = 'No paths or G04 dwell points found in file.';
       toolpath.value = [];
       dwellPoints.value = [];
+      selectedPathIndex.value = null;
     } else {
       toolpath.value = paths;
       dwellPoints.value = dwells;
+      selectedPathIndex.value = null;
       const moveCount = paths.reduce((sum, path) => sum + path.points.length, 0);
       status.value = `Loaded ${paths.length} paths, ${moveCount} moves, ${dwells.length} dwells.`;
     }
@@ -118,6 +135,46 @@ function resizeCanvasToContainer() {
 function getVisiblePaths() {
   if (showHeadMoves.value) return toolpath.value;
   return toolpath.value.filter((path) => path.drawn);
+}
+
+function selectPath(pathIndex) {
+  selectedPathIndex.value = selectedPathIndex.value === pathIndex ? null : pathIndex;
+}
+
+function scrollSelectedPathIntoView(pathIndex) {
+  if (pathIndex === null) return;
+
+  const lineNumbers = toolpath.value[pathIndex]?.lineNumbers ?? [];
+  if (!lineNumbers.length) return;
+
+  const targetLineNumber = lineNumbers[0];
+
+  nextTick(() => {
+    const container = gcodePreviewRef.value;
+    if (!container) return;
+
+    const targetLineEl = container.querySelector(`[data-line-number="${targetLineNumber}"]`);
+    if (!targetLineEl) return;
+
+    const lineTop = targetLineEl.offsetTop;
+    const lineBottom = lineTop + targetLineEl.offsetHeight;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+    const isVisible = lineTop >= viewTop && lineBottom <= viewBottom;
+
+    if (!isVisible) {
+      targetLineEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+  });
+}
+
+function formatLineRange(path) {
+  const lineNumbers = path.lineNumbers ?? [];
+  if (!lineNumbers.length) return '-';
+
+  const first = lineNumbers[0];
+  const last = lineNumbers[lineNumbers.length - 1];
+  return first === last ? `${first}` : `${first}-${last}`;
 }
 
 function redraw() {
@@ -190,18 +247,28 @@ function redraw() {
   }
 
   const allPoints = [];
+  const selectedPath = selectedPathIndex.value === null ? null : toolpath.value[selectedPathIndex.value] ?? null;
+  const hasVisibleSelection = !!selectedPath && (showHeadMoves.value || selectedPath.drawn);
 
-  visiblePaths.forEach((path) => {
+  toolpath.value.forEach((path, pathIndex) => {
+    if (!showHeadMoves.value && !path.drawn) {
+      return;
+    }
+
     if (!path.points.length) return;
 
+    const isSelected = selectedPathIndex.value === pathIndex;
+
     ctx.beginPath();
-    ctx.lineWidth = 2;
+    ctx.lineWidth = isSelected ? 4 : 2;
+    ctx.globalAlpha = hasVisibleSelection && !isSelected ? 0.2 : 1;
+
     if (path.drawn) {
       ctx.setLineDash([]);
-      ctx.strokeStyle = '#1976d2';
+      ctx.strokeStyle = isSelected ? '#ff8f00' : '#1976d2';
     } else {
       ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = '#999999';
+      ctx.strokeStyle = isSelected ? '#ef6c00' : '#999999';
     }
 
     path.points.forEach((p, index) => {
@@ -220,6 +287,7 @@ function redraw() {
     ctx.stroke();
   });
 
+  ctx.globalAlpha = 1;
   ctx.setLineDash([]);
 
   if (allPoints.length) {
@@ -321,6 +389,11 @@ watch(showGrid, () => {
 watch(showHeadMoves, () => {
   redraw();
 });
+
+watch(selectedPathIndex, () => {
+  redraw();
+  scrollSelectedPathIntoView(selectedPathIndex.value);
+});
 </script>
 
 <template>
@@ -332,6 +405,29 @@ watch(showHeadMoves, () => {
         Open G-code file
         <input type="file" accept=".gcode,.nc,.txt" @change="onFileChange" />
       </label>
+
+      <section class="path-list-card">
+        <h3>Paths</h3>
+        <p v-if="!toolpath.length" class="paths-empty">Load a file to see parsed paths.</p>
+        <ul v-else class="path-list">
+          <li v-for="(path, pathIndex) in toolpath" :key="pathIndex">
+            <button
+              type="button"
+              class="path-item"
+              :class="{
+                selected: selectedPathIndex === pathIndex,
+                hidden: !showHeadMoves && !path.drawn,
+              }"
+              @click="selectPath(pathIndex)"
+            >
+              <span class="path-item-title">Path {{ pathIndex + 1 }} · {{ path.drawn ? 'Draw' : 'Travel' }}</span>
+              <span class="path-item-meta">
+                {{ Math.max(path.points.length - 1, 0) }} moves · lines {{ formatLineRange(path) }}
+              </span>
+            </button>
+          </li>
+        </ul>
+      </section>
     </aside>
 
     <main class="col col-center">
@@ -373,8 +469,20 @@ watch(showHeadMoves, () => {
     </main>
 
     <aside class="col col-right">
-      <h2>Right column</h2>
-      <p>Use this for extra info, ads, or tools.</p>
+      <h2>G-code</h2>
+      <p v-if="!gcodeText" class="gcode-hint">Load a file to view its raw commands.</p>
+      <div v-else ref="gcodePreviewRef" class="gcode-preview">
+        <div
+          v-for="(line, lineIndex) in gcodeLines"
+          :key="lineIndex"
+          class="gcode-line"
+          :data-line-number="lineIndex + 1"
+          :class="{ selected: selectedPathLineSet.has(lineIndex + 1) }"
+        >
+          <span class="gcode-line-number">{{ lineIndex + 1 }}</span>
+          <span class="gcode-line-text">{{ line || ' ' }}</span>
+        </div>
+      </div>
     </aside>
   </div>
 </template>
@@ -383,8 +491,9 @@ watch(showHeadMoves, () => {
 .app-layout {
   display: grid;
   grid-template-columns: 1fr 2fr 1fr; /* left / center / right */
+  grid-template-rows: minmax(0, 1fr);
   gap: 1rem;
-  min-height: 100vh;
+  height: 100vh;
   padding: 1rem;
   box-sizing: border-box;
   background: #f0f2f5;
@@ -395,14 +504,24 @@ watch(showHeadMoves, () => {
   border-radius: 8px;
   padding: 1rem;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  min-height: 0;
 }
 
 .col-left {
   background: #f5f7ff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow: hidden;
 }
 
 .col-right {
   background: #fff7e6;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .col-center {
@@ -428,6 +547,73 @@ watch(showHeadMoves, () => {
   margin: 0.25rem 0 0;
   font-size: 0.85rem;
   color: #555;
+}
+
+.path-list-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.path-list-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.paths-empty {
+  margin: 0;
+  color: #61708a;
+  font-size: 0.9rem;
+}
+
+.path-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.path-item {
+  width: 100%;
+  border: 1px solid #d5dbea;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  padding: 0.55rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  cursor: pointer;
+}
+
+.path-item-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1f2a44;
+}
+
+.path-item-meta {
+  font-size: 0.78rem;
+  color: #5d6880;
+}
+
+.path-item.selected {
+  border-color: #ff8f00;
+  box-shadow: 0 0 0 2px rgba(255, 143, 0, 0.2);
+  background: #fff9ee;
+}
+
+.path-item.hidden {
+  opacity: 0.65;
 }
 
 .file-button {
@@ -508,6 +694,48 @@ watch(showHeadMoves, () => {
   pointer-events: none;
 }
 
+.gcode-hint {
+  margin: 0;
+  color: #8a6d3b;
+  font-size: 0.9rem;
+}
+
+.gcode-preview {
+  margin: 0;
+  padding: 0.35rem 0;
+  border-radius: 8px;
+  border: 1px solid #2c3340;
+  background: #0d1117;
+  color: #dbe9ff;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  font-family: Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.gcode-line {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0.55rem;
+  padding: 0.12rem 0.65rem;
+}
+
+.gcode-line-number {
+  color: #7f8aa3;
+  text-align: right;
+  user-select: none;
+}
+
+.gcode-line-text {
+  white-space: pre;
+}
+
+.gcode-line.selected {
+  background: rgba(255, 143, 0, 0.2);
+}
+
 </style>
 
 <style scoped>
@@ -527,6 +755,9 @@ watch(showHeadMoves, () => {
 @media (max-width: 768px) {
   .app-layout {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    height: auto;
+    min-height: 100vh;
   }
 
   .header-toggles {
